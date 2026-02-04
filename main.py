@@ -90,10 +90,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def fetch_news(session, tickers_list=None, size=20):
     url = "https://api.benzinga.com/api/v2/news"
     params = {"token": BENZINGA_API_KEY, "pageSize": size, "displayOutput": "full"}
+    headers = {"Accept": "application/json"}
     if tickers_list:
         params["tickers"] = ",".join(tickers_list)
     try:
-        async with session.get(url, params=params) as r:
+        async with session.get(url, params=params, headers=headers) as r:
             if r.status == 200:
                 return await r.json()
     except Exception as e:
