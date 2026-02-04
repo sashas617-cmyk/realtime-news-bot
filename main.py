@@ -232,7 +232,7 @@ async def news_loop(bot):
                             news_id = f"{headline}_{item.get('datetime','')}"
                             if news_id not in seen_news:
                                 seen_news.add(news_id)
-                                msg = f"<b>ð {kw}</b>\n{headline}"
+                                msg = f"<b>[KW] {kw}</b>\n{headline}"
                                 if TELEGRAM_TAPE_CHANNEL:
                                     await send_telegram(bot, TELEGRAM_TAPE_CHANNEL, msg)
                                     print(f"Posted: {kw} match - {headline[:50]}")
