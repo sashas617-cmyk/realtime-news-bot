@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-Time News Bot with Benzinga API - Improved Version"""
+"""Real-Time News Bot with Benzinga API - v3 with Rate Limiting Fix"""
 import asyncio
 import aiohttp
 import os
@@ -8,12 +8,16 @@ import re
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.error import RetryAfter
 
 BENZINGA_API_KEY = os.environ.get("BENZINGA_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_TAPE_CHANNEL = os.environ.get("TELEGRAM_TAPE_CHANNEL", "")
 INITIAL_WATCHLIST = os.environ.get("WATCHLIST", "AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,META,SPY,QQQ")
 INITIAL_KEYWORDS = os.environ.get("KEYWORDS", "")
+
+# Rate limiting: minimum seconds between messages
+MESSAGE_DELAY = 2.0
 
 DATA_FILE = "/tmp/newsbot_data.json"
 seen_news = set()
@@ -105,7 +109,7 @@ async def fetch_news(session, tickers_list=None, size=20):
             if r.status == 200:
                 return await r.json()
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Fetch error: {e}")
     return []
 
 def format_message(item, symbol=None, kw_tag=None):
@@ -115,7 +119,6 @@ def format_message(item, symbol=None, kw_tag=None):
     url = item.get('url', '')
     author = item.get('author', '')
 
-    # Build message
     lines = []
 
     # Header with symbol or keyword
@@ -129,7 +132,6 @@ def format_message(item, symbol=None, kw_tag=None):
 
     # Teaser (summary) - if available and different from title
     if teaser and teaser.lower() != title.lower() and len(teaser) > 20:
-        # Truncate if too long
         if len(teaser) > 200:
             teaser = teaser[:197] + "..."
         lines.append(f"\n{teaser}")
@@ -137,22 +139,59 @@ def format_message(item, symbol=None, kw_tag=None):
     # Source/Author and link
     if url:
         source = author if author else "Benzinga"
-        lines.append(f"\n<a href=\"{url}\">{source}</a>")
+        lines.append(f'\n<a href="{url}">{source}</a>')
 
     return "\n".join(lines)
 
 async def send_msg(bot, text):
-    if TELEGRAM_TAPE_CHANNEL:
+    """Send message with proper rate limit handling"""
+    if not TELEGRAM_TAPE_CHANNEL:
+        return False
+
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            await bot.send_message(chat_id=TELEGRAM_TAPE_CHANNEL, text=text, parse_mode='HTML', disable_web_page_preview=True)
+            await bot.send_message(
+                chat_id=TELEGRAM_TAPE_CHANNEL,
+                text=text,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            return True
+        except RetryAfter as e:
+            # Telegram told us to wait - respect it
+            wait_time = e.retry_after + 1
+            print(f"Rate limited, waiting {wait_time}s...")
+            await asyncio.sleep(wait_time)
         except Exception as e:
-            print(f"Send error: {e}")
+            error_str = str(e).lower()
+            if "flood" in error_str or "retry" in error_str:
+                # Extract wait time if possible, default to 30s
+                wait_time = 30
+                try:
+                    import re
+                    match = re.search(r'(\d+)', str(e))
+                    if match:
+                        wait_time = int(match.group(1)) + 1
+                except:
+                    pass
+                print(f"Flood control, waiting {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"Send error: {e}")
+                return False
+    return False
 
 async def news_loop(bot):
-    print("Starting Benzinga loop (v2)...")
+    print("Starting Benzinga loop (v3 - rate limited)...")
+    print(f"Message delay: {MESSAGE_DELAY}s")
+    print(f"Watching tickers: {tickers}")
+    print(f"Watching keywords: {keywords}")
+
     async with aiohttp.ClientSession() as s:
         while True:
             ct, ck = list(tickers), list(keywords)
+            messages_sent = 0
 
             # Fetch news for tickers
             if ct:
@@ -173,13 +212,15 @@ async def news_loop(bot):
                                 break
 
                         msg = format_message(item, symbol=sym)
-                        await send_msg(bot, msg)
-                        print(f"[BZ] ${sym} {title[:50]}")
-                    await asyncio.sleep(0.3)
+                        if await send_msg(bot, msg):
+                            print(f"[BZ] ${sym} {title[:50]}")
+                            messages_sent += 1
 
-            # Fetch general news for keyword matching - get more items
+                        # Rate limit delay
+                        await asyncio.sleep(MESSAGE_DELAY)
+
+            # Fetch general news for keyword matching
             if ck:
-                # Fetch larger batch for keyword matching
                 for item in await fetch_news(s, size=100):
                     nid = item.get('id', '')
                     title = item.get('title', '')
@@ -195,23 +236,38 @@ async def news_loop(bot):
                         if kw.lower() in searchable:
                             seen_news.add(nid)
                             msg = format_message(item, kw_tag=kw)
-                            await send_msg(bot, msg)
-                            print(f"[KW] {kw} {title[:50]}")
+                            if await send_msg(bot, msg):
+                                print(f"[KW] {kw} {title[:50]}")
+                                messages_sent += 1
+
+                            # Rate limit delay
+                            await asyncio.sleep(MESSAGE_DELAY)
                             break
 
+            # Cleanup old seen news
             if len(seen_news) > 5000:
                 seen_news.clear()
 
+            # Log cycle completion
+            if messages_sent > 0:
+                print(f"Cycle complete: {messages_sent} messages sent")
+
+            # Wait before next cycle
             await asyncio.sleep(60)
 
 async def main():
-    print("Starting Benzinga Bot v2...")
+    print("Starting Benzinga Bot v3...")
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    for cmd, fn in [("add", cmd_add), ("addkw", cmd_addkw), ("remove", cmd_remove), ("removekw", cmd_removekw), ("list", cmd_list), ("help", cmd_help), ("start", cmd_help)]:
+
+    for cmd, fn in [("add", cmd_add), ("addkw", cmd_addkw),
+                    ("remove", cmd_remove), ("removekw", cmd_removekw),
+                    ("list", cmd_list), ("help", cmd_help), ("start", cmd_help)]:
         app.add_handler(CommandHandler(cmd, fn))
+
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
+
     try:
         await news_loop(app.bot)
     finally:
