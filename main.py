@@ -90,8 +90,6 @@ async def cmd_removekeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # News Functions
 async def fetch_news(session, tickers=None, limit=50):
     params = {'apiKey': BENZINGA_API_KEY, 'limit': limit, 'sort': 'published.desc'}
-    if tickers:
-        params['tickers'] = ','.join(tickers)
     try:
         async with session.get(MASSIVE_API_URL, params=params, headers={'Accept': 'application/json'}) as r:
             if r.status == 200:
