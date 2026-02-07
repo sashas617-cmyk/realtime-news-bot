@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-Time News Bot with Massive.com API - v5 with TG Commands"""
+"""Real-Time News Bot v6 - LOCAL Ticker Filtering + Higher Limits"""
 import asyncio
 import aiohttp
 import os
@@ -16,6 +16,8 @@ INITIAL_TICKERS = os.environ.get("WATCHLIST", "AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,ME
 INITIAL_KEYWORDS = os.environ.get("KEYWORDS", "")
 
 MESSAGE_DELAY = 2.0
+POLL_INTERVAL = 30  # Check every 30 seconds
+FETCH_LIMIT = 200   # Get 200 articles to not miss smaller tickers
 DATA_FILE = "/tmp/newsbot_data.json"
 MASSIVE_API_URL = "https://api.massive.com/benzinga/v2/news"
 seen_news = set()
@@ -27,7 +29,7 @@ def load_data():
                 return json.load(f)
     except: pass
     return {
-        "tickers": [t.strip() for t in INITIAL_TICKERS.split(",") if t.strip()],
+        "tickers": [t.strip().upper() for t in INITIAL_TICKERS.split(",") if t.strip()],
         "keywords": [k.strip().lower() for k in INITIAL_KEYWORDS.split(",") if k.strip()]
     }
 
@@ -35,9 +37,8 @@ def save_data(data):
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f)
 
-# TG Commands
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("News Bot!\nCommands:\n/tickers /keywords\n/addticker SYMBOL\n/removeticker SYMBOL\n/addkeyword WORD\n/removekeyword WORD")
+    await update.message.reply_text("News Bot v6!\n/tickers /keywords\n/addticker SYMBOL\n/removeticker SYMBOL\n/addkeyword WORD\n/removekeyword WORD")
 
 async def cmd_tickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
@@ -55,7 +56,7 @@ async def cmd_addticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ticker not in data["tickers"]:
         data["tickers"].append(ticker)
         save_data(data)
-    await update.message.reply_text(f"Tickers: {', '.join(data['tickers'])}")
+    await update.message.reply_text(f"Added {ticker}. Tickers: {', '.join(data['tickers'])}")
 
 async def cmd_removeticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -75,7 +76,7 @@ async def cmd_addkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if kw not in data["keywords"]:
         data["keywords"].append(kw)
         save_data(data)
-    await update.message.reply_text(f"Keywords: {', '.join(data['keywords'])}")
+    await update.message.reply_text(f"Added '{kw}'. Keywords: {', '.join(data['keywords'])}")
 
 async def cmd_removekeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -87,44 +88,58 @@ async def cmd_removekeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(data)
     await update.message.reply_text(f"Keywords: {', '.join(data['keywords'])}")
 
-# News Functions
-async def fetch_news(session, tickers=None, limit=50):
+async def fetch_all_news(session, limit=200):
+    """Fetch news from Massive.com API - no ticker param (it's broken)"""
     params = {'apiKey': BENZINGA_API_KEY, 'limit': limit, 'sort': 'published.desc'}
     try:
         async with session.get(MASSIVE_API_URL, params=params, headers={'Accept': 'application/json'}) as r:
             if r.status == 200:
-                return (await r.json()).get('results', [])
+                data = await r.json()
+                return data.get('results', [])
+            print(f"API error: {r.status}")
             return []
-    except:
+    except Exception as e:
+        print(f"Fetch error: {e}")
         return []
 
-async def fetch_keyword_news(session, keywords, limit=100):
+def matches_ticker(article, tickers):
+    """Check if article mentions any of our tickers"""
+    if not tickers:
+        return False
+    article_tickers = article.get('tickers', []) or article.get('stocks', [])
+    if not article_tickers:
+        return False
+    normalized = []
+    for t in article_tickers:
+        if isinstance(t, dict):
+            name = t.get('name', '').upper()
+            if name:
+                normalized.append(name)
+        else:
+            normalized.append(str(t).upper())
+    return any(ticker.upper() in normalized for ticker in tickers)
+
+def matches_keyword(article, keywords):
+    """Check if article contains any of our keywords"""
     if not keywords:
-        return []
-    try:
-        async with session.get(MASSIVE_API_URL, params={'apiKey': BENZINGA_API_KEY, 'limit': limit, 'sort': 'published.desc'}, headers={'Accept': 'application/json'}) as r:
-            if r.status != 200:
-                return []
-            articles = (await r.json()).get('results', [])
-            return [a for a in articles if any(kw in ((a.get('title') or '')+(a.get('teaser') or '')).lower() for kw in keywords)]
-    except:
-        return []
+        return False
+    text = ((article.get('title') or '') + ' ' + (article.get('teaser') or '')).lower()
+    return any(kw.lower() in text for kw in keywords)
 
 def format_msg(a):
     title = a.get('title', 'No title')
     teaser = a.get('teaser', '')
-    author = a.get('author', '')
     url = a.get('url', '')
-    tickers = a.get('tickers', [])
+    article_tickers = a.get('tickers', []) or a.get('stocks', [])
+    ticker_list = [t.get('name', '') if isinstance(t, dict) else str(t) for t in article_tickers[:5]]
+    
     msg = f"<b>{title}</b>"
-    if tickers:
-        msg += f"\n<i>Tickers: {', '.join(tickers[:5])}</i>"
+    if ticker_list:
+        msg += f"\n<i>{', '.join(ticker_list)}</i>"
     if teaser:
         msg += f"\n\n{teaser[:300]}"
-    if author:
-        msg += f"\n<i>By {author}</i>"
     if url:
-        msg += f'\n<a href="{url}">Read more</a>'
+        msg += f'\n<a href="{url}">Read</a>'
     return msg
 
 async def send_msg(bot, text):
@@ -140,64 +155,65 @@ async def send_msg(bot, text):
             if "flood" in str(e).lower():
                 await asyncio.sleep(30)
             else:
+                print(f"Send error: {e}")
                 return False
     return False
 
 async def news_loop(app):
     global seen_news
     bot = app.bot
-    data = load_data()
-    print(f"Starting: tickers={data['tickers']}, keywords={data['keywords']}")
     
     async with aiohttp.ClientSession() as session:
-        ticker_news = await fetch_news(session, data['tickers'], 30)
-        keyword_news = await fetch_keyword_news(session, data['keywords'], 50)
-        
-        all_news = {}
-        for a in ticker_news + keyword_news:
-            nid = a.get('benzinga_id')
-            if nid and nid not in all_news:
-                all_news[nid] = a
-        
-        print(f"Found {len(all_news)} articles")
-        sent = 0
-        for nid, a in list(all_news.items())[:25]:
-            if nid in seen_news:
-                continue
-            if await send_msg(bot, format_msg(a)):
-                seen_news.add(nid)
-                sent += 1
-                await asyncio.sleep(MESSAGE_DELAY)
-        print(f"Sent {sent} initial")
-        
         while True:
-            await asyncio.sleep(60)
             try:
                 data = load_data()
-                ticker_news = await fetch_news(session, data['tickers'], 20)
-                keyword_news = await fetch_keyword_news(session, data['keywords'], 30)
+                tickers = data.get('tickers', [])
+                keywords = data.get('keywords', [])
                 
-                for a in ticker_news + keyword_news:
-                    nid = a.get('benzinga_id')
-                    if nid and nid not in seen_news:
+                all_articles = await fetch_all_news(session, FETCH_LIMIT)
+                print(f"Fetched {len(all_articles)} articles")
+                
+                # LOCAL FILTERING
+                matched = 0
+                for a in all_articles:
+                    nid = a.get('benzinga_id') or a.get('id')
+                    if not nid or nid in seen_news:
+                        continue
+                    
+                    if matches_ticker(a, tickers) or matches_keyword(a, keywords):
                         if await send_msg(bot, format_msg(a)):
                             seen_news.add(nid)
+                            matched += 1
+                            # Show which ticker matched
+                            article_tickers = a.get('tickers', []) or a.get('stocks', [])
+                            ticker_names = [t.get('name') if isinstance(t, dict) else t for t in article_tickers]
+                            print(f"MATCH: {ticker_names} - {a.get('title', '')[:40]}")
                             await asyncio.sleep(MESSAGE_DELAY)
+                
+                if matched:
+                    print(f"Sent {matched} matching articles")
                 
                 if len(seen_news) > 10000:
                     seen_news.clear()
+                    
             except Exception as e:
-                print(f"Error: {e}")
-                await asyncio.sleep(30)
+                print(f"Loop error: {e}")
+            
+            await asyncio.sleep(POLL_INTERVAL)
 
 async def post_init(app):
     asyncio.create_task(news_loop(app))
 
 def main():
     if not BENZINGA_API_KEY or not TELEGRAM_BOT_TOKEN:
-        print("Missing env vars!")
+        print("Missing BENZINGA_API_KEY or TELEGRAM_BOT_TOKEN!")
         return
-    
+
+    data = load_data()
+    print(f"Tickers: {data.get('tickers', [])}")
+    print(f"Keywords: {data.get('keywords', [])}")
+    print(f"Polling every {POLL_INTERVAL}s, fetching {FETCH_LIMIT} articles")
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("tickers", cmd_tickers))
@@ -206,8 +222,8 @@ def main():
     app.add_handler(CommandHandler("removeticker", cmd_removeticker))
     app.add_handler(CommandHandler("addkeyword", cmd_addkeyword))
     app.add_handler(CommandHandler("removekeyword", cmd_removekeyword))
-    
-    print("Bot starting...")
+
+    print("Bot v6 starting...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
