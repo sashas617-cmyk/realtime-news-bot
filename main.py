@@ -9,7 +9,7 @@ from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.error import RetryAfter
 
-BENZINGA_API_KEY = os.environ.get("BENZINGA_API_KEY", "")
+MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_TAPE_CHANNEL = os.environ.get("TELEGRAM_TAPE_CHANNEL", "")
 INITIAL_TICKERS = os.environ.get("WATCHLIST", "AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,META,SPY,QQQ")
@@ -90,7 +90,7 @@ async def cmd_removekeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fetch_all_news(session, limit=200):
     """Fetch news from Massive.com API - no ticker param (it's broken)"""
-    params = {'apiKey': BENZINGA_API_KEY, 'limit': limit, 'sort': 'published.desc'}
+    params = {'apiKey': MASSIVE_API_KEY, 'limit': limit, 'sort': 'published.desc'}
     try:
         async with session.get(MASSIVE_API_URL, params=params, headers={'Accept': 'application/json'}) as r:
             if r.status == 200:
@@ -205,8 +205,8 @@ async def post_init(app):
     asyncio.create_task(news_loop(app))
 
 def main():
-    if not BENZINGA_API_KEY or not TELEGRAM_BOT_TOKEN:
-        print("Missing BENZINGA_API_KEY or TELEGRAM_BOT_TOKEN!")
+    if not MASSIVE_API_KEY or not TELEGRAM_BOT_TOKEN:
+        print("Missing MASSIVE_API_KEY or TELEGRAM_BOT_TOKEN!")
         return
 
     data = load_data()
